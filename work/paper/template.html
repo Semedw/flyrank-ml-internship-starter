@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Which page should an editor fix first? A refresh-priority model on real search data</title>
+<meta name="description" content="Research paper: a repeatable refresh-opportunity scoring model built on the FlyRank ML Internship warehouse release, validated time-aware on a sealed test month.">
+<style>
+  :root { --ink:#1a1a2e; --muted:#5c5c74; --accent:#274690; --paper:#ffffff; --soft:#f6f7fb; --line:#e3e5ee; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         color:var(--ink); background:var(--paper); line-height:1.6; }
+  .wrap { max-width:780px; margin:0 auto; padding:0 20px; }
+  header { padding:48px 0 28px; border-bottom:3px solid var(--accent); }
+  h1 { font-size:1.75rem; line-height:1.25; margin:0 0 10px; }
+  .sub { color:var(--muted); font-size:1rem; }
+  .meta { color:var(--muted); font-size:.85rem; margin-top:14px; }
+  h2 { font-size:1.25rem; margin:40px 0 10px; padding-bottom:4px; border-bottom:1px solid var(--line); }
+  h3 { font-size:1.02rem; margin:24px 0 6px; }
+  p { margin:10px 0; }
+  .abstract { background:var(--soft); border-left:4px solid var(--accent); padding:16px 18px; border-radius:0 8px 8px 0; }
+  .abstract p { margin:0; }
+  figure { margin:22px 0; text-align:center; }
+  figure img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  figcaption { font-size:.85rem; color:var(--muted); margin-top:8px; text-align:left; }
+  table { border-collapse:collapse; width:100%; margin:16px 0; font-size:.92rem; }
+  th, td { border:1px solid var(--line); padding:7px 10px; text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  th { background:var(--soft); }
+  .highlight td { font-weight:600; background:#eef3fb; }
+  code { background:var(--soft); border:1px solid var(--line); border-radius:4px; padding:1px 5px; font-size:.88em; }
+  ul, ol { margin:10px 0 10px 22px; }
+  li { margin:5px 0; }
+  .callout { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin:16px 0; }
+  .small { font-size:.85rem; color:var(--muted); }
+  footer { margin:56px 0 40px; padding-top:18px; border-top:1px solid var(--line); color:var(--muted); font-size:.85rem; }
+  a { color:var(--accent); }
+  @media (max-width:600px){ h1{font-size:1.4rem;} header{padding:32px 0 20px;} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Which page should an editor fix first? A refresh-priority model on real search data</h1>
+  <div class="sub">Lane 2 — Refresh / Content Opportunity Scoring · Capstone research paper</div>
+  <div class="meta">Built on the FlyRank ML Internship dataset · repo: <a href="https://github.com/Semedw/flyrank-ml-internship-starter">Semedw/flyrank-ml-internship-starter</a></div>
+</header>
+
+<h2>Abstract</h2>
+<div class="abstract">
+  <p>Which page should an editor review first this week? We answer that question with a ranked
+  review queue built on the FlyRank ML Internship warehouse release ({{N_CLIENTS}} pseudonymized
+  clients, ~79M daily rows, Jan 2025 – Jun 2026). We score each page at four month-end decision
+  moments using only the 30 days of search signals known before the decision, and we label each
+  page by an observed future outcome: whether its clicks (or impressions, for low-click pages)
+  fell below 70% of their prior level in the next 30 days. A random forest trained on those
+  feature-window signals and evaluated once, blind, on a sealed final test month ranked review
+  candidates with {{RF_AUC}} ROC-AUC and {{RF_P50}} precision@50 — a {{LIFT_P50}} lift over the
+  transparent rule baseline's {{BL_P50}} — at a {{BASE_RATE}} decline base rate. The output is a
+  decision-support queue of pages with scores, actions, and reason codes, for editors triaging a
+  fixed weekly review capacity.</p>
+</div>
+
+<h2>1. Introduction / problem statement</h2>
+<p>Content teams face a familiar constraint: the queue of pages that <em>might</em> need a
+refresh, rewrite, or prune is far longer than any editor's weekly capacity. Someone has to decide
+<b>which pages get the limited review hours first</b>. Done badly, that triage wastes the hours on
+pages that were fine, and misses the pages whose visibility is actually collapsing.</p>
+<p>This work supports exactly that decision. The unit of analysis is one content page at one
+decision moment. The output is a ranked queue: for every scoreable page, a review-priority score,
+a suggested action, and human-readable reason codes. The cost of a wrong call is bounded — a
+misranked page costs review time, not money — which is why a review queue is the right shape of
+output, and why precision on the <em>top of the queue</em> is the metric that matters.</p>
+<p>Why does data/ML help at all? The signals that plausibly predict a coming decline — position,
+exposure, freshness, engagement, content depth — are many, tangled, and shifting over time. A
+hand-written rule (the baseline) can name the obvious cases, but whether the tangle of signals
+carries extra signal beyond that rule is a question the data can answer better than a person
+eyeballing it.</p>
+
+<h2>2. Data</h2>
+<p><b>Release:</b> the FlyRank ML Internship warehouse release
+(<code>flyrank_pseudonymized_warehouse_release_v20260703</code>, Hugging Face,
+<a href="https://huggingface.co/datasets/FlyRank/internship-warehouse">FlyRank/internship-warehouse</a>),
+gated, read-token access. Everything is pseudonymized: client, content, and query identifiers are
+scrambled hashes; no client names, domains, URLs, titles, or raw queries exist in the release.</p>
+<h3>Tables and windows</h3>
+<ul>
+  <li><code>fact_content_daily_performance</code> — daily rows per content item (2025-01-27 →
+      2026-06-30), the source of all feature and label signals. We touch only the
+      <code>month=2026-01 … 2026-06</code> partitions the contract's windows fall in.</li>
+  <li><code>dim_content</code> — content metadata (word/char counts, content age) joined for
+      depth and freshness features.</li>
+  <li><code>dim_clients</code> — per-client tracking start (<code>gsc_data_start</code>) used to
+      filter clients whose history began after a decision moment.</li>
+</ul>
+<p><b>Decision moments:</b> four month-ends — 2026-02-28, 2026-03-31, 2026-04-30 (training
+months) and 2026-05-31 (the sealed test decision). For each, features use the 30 days before the
+moment and the label uses the 30 days after it. <b>June 2026 — the panel's final month — is the
+test-label window and was never read during development</b>; the <code>_sample</code> table (also
+June) was never used, precisely because it is the outcome window of the final decision.</p>
+<h3>What we excluded, and why</h3>
+<ul>
+  <li><b>Label-derived fields</b> (<code>trend_direction</code>, <code>trend_pct</code> and
+      friends): they are computed from the outcome we are predicting.</li>
+  <li><b>Product decision flags</b> (<code>health_score</code>, <code>priority_score</code>,
+      <code>action_type</code>): they do not ship in the release — the data is observable signals
+      only, and modeling the product's own answers would be circular.</li>
+  <li><b>The query table</b> (<code>fact_content_query_90d</code>): its fixed 90-day window cannot
+      be aligned leak-safely with our 30-day feature windows, so it is excluded entirely.</li>
+  <li><b>Identity fields</b> (<code>*_hash_id</code>): used for grouping and splitting only,
+      never as features.</li>
+  <li><b>Rows before a client's tracking start</b> (per <code>gsc_data_start</code>): "no data
+      yet" must not be read as "no traffic". GA4-derived columns are likewise gated by the
+      release's <code>ga4_data_available</code> flag, with explicit has-signal flags.</li>
+  <li><b>Pages without evidence</b>: no impressions in the feature window means nothing to score;
+      such rows are excluded from supervised learning and kept as low-evidence monitor items.</li>
+</ul>
+
+<h2>3. Methodology</h2>
+<h3>Assumptions</h3>
+<ul>
+  <li>Decline is an observable future outcome, not a product's opinion: volume in the next 30
+      days vs the previous 30 days.</li>
+  <li>Minimum volume floors make the label robust to noise; they are policy choices, documented
+      below and sensitivity-checked.</li>
+  <li>We claim only <b>observed / directional / decision-support</b> results. No causal claim:
+      this data cannot prove that refreshing a page <em>causes</em> recovery.</li>
+</ul>
+<h3>Label definition (one sentence)</h3>
+<p>A page is <code>decline_30d = 1</code> if its clicks in the 30 days after the decision moment
+fell below <b>70%</b> of its prior-30-day clicks (clicks floor ≥ 30), or — for low-click pages —
+its impressions fell below <b>70%</b> of prior-30-day impressions (impressions floor ≥ 300).
+Pages meeting neither floor are unlabelled (monitor bucket). The label is always computed from
+the <em>label window</em>, never the feature window. Across the four decision moments,
+{{N_EVIDENCE}} pages carry enough evidence to be labelled; the rest are kept as low-evidence
+monitor items.</p>
+<h3>Features (feature window only, known before the decision)</h3>
+<ul>
+  <li><b>Exposure:</b> log impressions, log clicks, days-with-impressions / days-with-clicks
+      shares, log GA4 sessions, log AI sessions, log scroll events (each gated by data
+      availability flags).</li>
+  <li><b>Position:</b> average position (rows with no position data excluded), days-with-position
+      share, position in the 1–20 review band.</li>
+  <li><b>Capture:</b> CTR% (clicks/impressions, computed, not shipped), GA4 engagement share.</li>
+  <li><b>Content:</b> word count, char count, content age, has-data flags for each gated field.</li>
+</ul>
+<p>Identities (<code>client_hash_id</code>, <code>content_hash_id</code>) are never features;
+dates are never features; nothing from the label window (<code>*_lw</code>) is ever a feature.</p>
+<h3>Baseline (the thing to beat)</h3>
+<p>A transparent, hand-written rule scored entirely from feature-window signals: weighted
+normalized sub-scores for freshness risk (30%), CTR gap vs expected-by-position (30%), visibility
+(25%), and engagement depth (15%), with reason codes
+(<code>aging_visible</code>, <code>stale_visible</code>, <code>ctr_fix_candidate</code>,
+<code>thin_visible</code>, <code>page_one_decay_risk</code>, <code>monitor</code>). Every
+threshold in it is written in the code and stated in the repo.</p>
+<h3>Validation design</h3>
+<ul>
+  <li><b>Time-aware split:</b> train on the three earlier decisions (labels Mar/Apr/May), test
+      once on the 2026-05-31 decision (labels June — the sealed month). The test set was never
+      touched during development; the sealed test was evaluated exactly once.</li>
+  <li><b>No hyperparameter tuning:</b> default sklearn settings, <code>random_state=42</code>, so
+      nothing was selected by peeking at the test.</li>
+  <li><b>Client-holdout robustness:</b> a GroupShuffleSplit over clients, inside the training
+      months only, checks whether the pattern survives unseen sites (random forest median
+      {{GSS_MED_AUC}} ROC-AUC, range {{GSS_MIN_AUC}}–{{GSS_MAX_AUC}} — the pattern does not
+      depend on knowing the test clients).</li>
+  <li><b>Leakage checks (all pass):</b> feature window and label window are disjoint by
+      construction (<code>[D-30, D)</code> vs <code>[D, D+30)</code>); no <code>*_lw</code> column
+      appears in the feature list; no hash column appears in the feature list; no June rows exist
+      in training.</li>
+</ul>
+
+<h2>4. Results</h2>
+<p>On the sealed June test month, at a <b>{{BASE_RATE}}</b> decline base rate
+({{N_TEST}} scored pages, trained on {{N_TRAIN}} labelled pages across three earlier decision
+months), the model beats the rule baseline on every headline metric, same rows, same split:</p>
+<table>
+  <thead><tr><th>Method</th><th>ROC-AUC</th><th>Precision@20</th><th>Precision@50</th><th>Base rate</th></tr></thead>
+  <tbody>
+    <tr><td>Rule baseline</td><td>{{BL_AUC}}</td><td>{{BL_P20}}</td><td>{{BL_P50}}</td><td>{{BASE_RATE}}</td></tr>
+    <tr><td>Logistic regression</td><td>{{LR_AUC}}</td><td>—</td><td>—</td><td>{{BASE_RATE}}</td></tr>
+    <tr><td>Decision tree</td><td>{{DT_AUC}}</td><td>—</td><td>—</td><td>{{BASE_RATE}}</td></tr>
+    <tr class="highlight"><td>Random forest</td><td>{{RF_AUC}}</td><td>{{RF_P20}}</td><td>{{RF_P50}}</td><td>{{BASE_RATE}}</td></tr>
+  </tbody>
+</table>
+<p>In plain words: of the top 50 pages the model puts at the top of the review queue, about
+{{RF_P50_PAGES}} actually declined in June — versus {{BL_P50_PAGES}} for the rule, a
+<b>{{LIFT_P50}} lift</b> (and {{LIFT_P20}} at the top 20, where capacity is scarcest), and the
+base rate says a random pick would find <code>{{BASE_RATE}}</code> — the ranking is real, not an
+artifact of a high base rate. In discrimination terms the forest adds <b>{{AUC_GAIN}}</b> ROC-AUC
+over the rule, and the observed decline rate differs by month
+(Feb {{FEB_RATE}} · Mar {{MAR_RATE}} · Apr {{APR_RATE}} · May {{MAY_RATE}}), which is exactly why
+a time-aware test was mandatory.</p>
+
+<figure>
+  <img src="figures/precision_at_k.svg" alt="Precision at K: model vs baseline">
+  <figcaption><b>Precision@K, sealed June test.</b> The random forest keeps its edge at the top
+  of the queue — exactly where a fixed weekly review capacity reads it.</figcaption>
+</figure>
+
+<figure>
+  <img src="figures/model_auc.svg" alt="Model families vs baseline AUC">
+  <figcaption><b>Discrimination by model family.</b> The tree family carries more signal than the
+  linear baseline; the rule's AUC is shown as the reference line.</figcaption>
+</figure>
+
+<figure>
+  <img src="figures/feature_importance.svg" alt="Feature importance">
+  <figcaption><b>What moves the ranking.</b> Exposure, position, CTR capture, engagement share,
+  and content age dominate — the same families of signals an editor would name, but ranked on
+  evidence.</figcaption>
+</figure>
+
+<figure>
+  <img src="figures/base_rate_by_month.svg" alt="Decline rate by decision month">
+  <figcaption><b>Base rate is not constant.</b> The observed decline rate differs by decision
+  month, which is why every score is compared against its month's base rate and why a
+  time-aware test was mandatory.</figcaption>
+</figure>
+
+<figure>
+  <img src="figures/reason_codes.svg" alt="Reason code mix">
+  <figcaption><b>Why pages enter the queue.</b> Most review candidates are flagged by more than
+  one rule; the codes exist so a human can check the reason before acting.</figcaption>
+</figure>
+
+<h3>What the errors look like</h3>
+<p>The model's misses concentrate in two places: low-signal pages where the feature window was
+thin (few impressions days, near the floors), and pages whose decline arrived as a single
+large drop in the last days of the label window — visible after the fact, unlearnable from the
+feature window. Both are honest failure modes; both argue for keeping the model's output as a
+review queue rather than an automatic action.</p>
+
+<h2>5. Limitations &amp; honest framing</h2>
+<div class="callout">
+<ul>
+  <li><b>Observed, not causal.</b> This work shows that feature-window signals <em>precede</em>
+      declines and rank pages. It does not show that acting on the queue (refresh, rewrite, prune)
+      <em>causes</em> recovery — that would need an experiment.</li>
+  <li><b>Not a Google-algorithm claim.</b> We never observe the search engine's internals; we
+      only observe search-impressions, clicks, and positions.</li>
+  <li><b>One sealed month.</b> The test is a single month on a single snapshot. Seasonality,
+      SERP-layout changes, and client mix drift all could shift these numbers; the client-holdout
+      robustness check is a guard, not a guarantee.</li>
+  <li><b>Label is a threshold choice.</b> "70% of prior volume" is a defensible but arbitrary
+      line; moving it changes the base rate ({{BASE_RATE_PCT}} of scored pages here) and the
+      ranking's meaning (sensitivity is reported in the repo).</li>
+  <li><b>Decision-support only.</b> Every high-ranked page still needs a human look: the data
+      cannot see title quality, intent mismatch, or editorial context.</li>
+  <li><b>GA4 signals are sparser.</b> Engagement features only exist where GA4 tracking was live
+      (<code>ga4_data_available</code>); has-flags encode that, but the signal is thinner than
+      search exposure.</li>
+</ul>
+</div>
+
+<h2>6. Ranked recommendations (the action playbook)</h2>
+<p>For an editor with a fixed weekly review capacity, the queue is read top-down. Each page
+carries a score, an action, and reason codes. Recommended actions:</p>
+<table>
+  <thead><tr><th>Rank band</th><th>Action</th><th>When</th><th>Reason codes that fire</th></tr></thead>
+  <tbody>
+    <tr><td>Top 5%</td><td><b>Review first</b></td><td>High model score + ≥500 impressions</td>
+        <td><code>stale_visible</code>, <code>ctr_fix_candidate</code>, <code>page_one_decay_risk</code></td></tr>
+    <tr><td>Next 10%</td><td><b>Refresh or rewrite</b></td><td>Declining, still visible, thin or aging</td>
+        <td><code>aging_visible</code>, <code>thin_visible</code></td></tr>
+    <tr><td>Mid queue</td><td><b>Metadata review</b></td><td>Visible, low CTR vs position tier</td>
+        <td><code>ctr_fix_candidate</code></td></tr>
+    <tr><td>Bottom</td><td><b>Monitor</b></td><td>No action code or low evidence</td>
+        <td><code>monitor</code></td></tr>
+  </tbody>
+</table>
+<h3>Human review &amp; the no-go list</h3>
+<ul>
+  <li>A person must check the page before any change — the model ranks, it does not edit.</li>
+  <li>Never automate pruning or merging from the queue alone; consolidation look-alikes need a
+      human to confirm.</li>
+  <li>Never treat "declining" as "refresh will fix it" — the data supports prioritization, not
+      treatment effect.</li>
+  <li>Re-run the queue monthly; retrain when the sealed-month evaluation drifts (monitoring
+      triggers are in the repo).</li>
+</ul>
+
+<h2>7. Reproducibility</h2>
+<ul>
+  <li><b>Capstone notebook:</b> <a href="https://github.com/Semedw/flyrank-ml-internship-starter/blob/main/work/notebooks/capstone.ipynb">work/notebooks/capstone.ipynb</a>
+      — runs the whole pipeline top to bottom.</li>
+  <li><b>Pipeline scripts:</b> <code>work/scripts/</code> —
+      <code>build_frame.py</code> (one aggregated scan → cached frame) →
+      <code>build_features.py</code> (label + features + leakage asserts) →
+      <code>build_baseline.py</code> (rule + reason codes) →
+      <code>train_model.py</code> (models, sealed test, robustness) →
+      <code>make_charts.py</code> (this page's figures) →
+      <code>render_paper.py</code> (renders this page from the receipts).</li>
+  <li><b>Random seeds:</b> <code>random_state=42</code> everywhere; no hyperparameter tuning.</li>
+  <li><b>Environment:</b> <code>requirements.txt</code> in the repo root; the notebooks install
+      duckdb/huggingface_hub/sklearn in their setup cell.</li>
+  <li><b>Receipts:</b> every number on this page comes from the committed JSON files under
+      <code>work/outputs/capstone/</code> (<code>model_results.json</code>,
+      <code>baseline_metrics.json</code>, <code>client_holdout_robustness.json</code>,
+      <code>feature_importances.json</code>).</li>
+  <li><b>Data access:</b> request access to the gated release; the READ token goes in the
+      environment or Colab secrets — never in the repo.</li>
+</ul>
+
+<h2>8. Acknowledgments &amp; data credit</h2>
+<p>Built on the <a href="https://flyrank.ai">FlyRank ML Internship</a> dataset — the
+FlyRank internship warehouse release (pseudonymized), used under the internship's data-use
+terms. Thanks to the internship mentors whose skill library (data contracts, honest baselines,
+leakage audits, claim writing) shaped this pipeline. All analysis, code, and writing are my own;
+any errors are mine.</p>
+
+<footer>
+  Research paper · Lane 2: Refresh / Content Opportunity Scoring · FlyRank ML Internship capstone.
+  Observational, decision-support analysis — see Limitations for exactly what this can and cannot claim.
+</footer>
+
+</div>
+</body>
+</html>

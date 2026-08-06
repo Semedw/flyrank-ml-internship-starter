@@ -34,3 +34,6 @@ __pycache__/
 .venv/
 venv/
 .env
+
+# DuckDB spill / scratch
+.tmp/
